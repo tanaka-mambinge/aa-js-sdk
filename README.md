@@ -1,8 +1,15 @@
 # AA Node SDK
 
-TypeScript SDK for agents to create and track Agent Approvals requests.
+Use this SDK for inline approval waits.
 
-## Usage
+## Flow
+
+1. Call `client.approvals.create(...)`.
+2. Poll `client.approvals.get(id)` until `status === "approved"`.
+3. If `status` is `rejected`, `cancelled`, or `timed_out`, stop and return error.
+4. If approved, run real work inside same async fn.
+
+## Example
 
 ```ts
 import { createAaClient } from "@iamt12e/aa";
@@ -11,44 +18,51 @@ const client = createAaClient({
   baseUrl: "http://127.0.0.1:8087/api/v1",
 });
 
-const approval = await client.approvals.create({
-  action: "domain.root.delete",
-  risk: "critical",
-  title: "Delete root domain",
-  summary: "Delete example.com",
-  extra: { domain: "example.com" },
-});
+async function waitForApproval(id: string, timeoutMs = 300_000) {
+  const start = Date.now();
 
-// Poll for a decision
-const current = await client.approvals.get(approval.id);
+  while (true) {
+    const approval = await client.approvals.get(id);
 
-// Cancel a request the agent no longer needs
-await client.approvals.cancel(approval.id);
+    if (
+      approval.status === "approved" ||
+      approval.status === "rejected" ||
+      approval.status === "cancelled" ||
+      approval.status === "timed_out"
+    ) {
+      return approval;
+    }
+
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("Approval timeout");
+    }
+
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+async function doSomething() {
+  const request = await client.approvals.create({
+    action: "task.complete",
+    risk: "high",
+    title: "Complete task",
+    summary: "Needs human approval before final action",
+    extra: { taskId: "task_123" },
+  });
+
+  const approval = await waitForApproval(request.id);
+
+  if (approval.status !== "approved") {
+    throw new Error(`approval ${approval.status}`);
+  }
+
+  return runActualCode();
+}
 ```
 
-`baseUrl` is the single API v1 URL. There is no separate approvals URL.
+## Notes
 
-## Authentication
-
-Create a project token in the dashboard (Project tokens → New token) and set it as
-`AA_TOKEN` in that project's environment (e.g. `.env`). `createAaClient` reads
-`process.env.AA_TOKEN` automatically when `token` isn't passed explicitly, so each
-project's token is picked up without extra config — and approvals created with it
-can be filtered by project in the dashboard.
-
-To override the env var (e.g. for tests or multi-tenant setups), pass `token` explicitly:
-
-```ts
-const client = createAaClient({
-  baseUrl: "http://127.0.0.1:8087/api/v1",
-  token: "aa_xxx", // overrides AA_TOKEN
-});
-```
-
-## Scripts
-
-```bash
-npm run typecheck
-npm run test
-npm run build
-```
+- No resume token.
+- No extra approval credential.
+- Approval is source of truth.
+- Keep action idempotent.
